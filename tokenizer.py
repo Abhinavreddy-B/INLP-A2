@@ -10,11 +10,15 @@ from nltk.tokenize import sent_tokenize, word_tokenize, MWETokenizer
 
 import re
 from nltk.tokenize import sent_tokenize, word_tokenize, MWETokenizer
-from typing import List, Dict
+from typing import List, Dict, Set
 
 class Tokeniser:
+    __frequency_treshold = 2
+
     __tokenizer = None
     __substitutions = None
+    __vocab: Set[str] = set()
+    __vocab_freq: Dict[str, int] = {}
     __word_to_index: Dict[str, int] = {}
     __index_to_word: Dict[int, str] = {}
     __vocab_size: int = 0
@@ -60,7 +64,7 @@ class Tokeniser:
     def __split_into_sentences(self, text: str) -> List[str]:
         return sent_tokenize(text)
     
-    def tokenise_into_words(self, text: str) -> List[List[str]]:
+    def __tokenise_into_words(self, text: str) -> List[List[str]]:
         text = self.__scrap_unnecessary_corpus(text)
 
         for [substitution, pattern] in self.__substitutions:
@@ -70,6 +74,21 @@ class Tokeniser:
 
         return [self.__tokenizer.tokenize(word_tokenize(sentence)) for sentence in sentences]
     
+    def tokenise_into_words(self, text: str) -> List[str]:
+        text = self.__tokenise_into_words(text)
+        transformed_text = []
+
+        for sentence in text:
+            transformed_sentence = []
+            for word in sentence:
+                if word in self.__vocab:
+                    transformed_sentence.append(word)
+                else:
+                    transformed_sentence.append('<UNK>')
+            transformed_text.append(transformed_sentence)
+        
+        return transformed_text
+
     def tokenise_into_sentence(self, text: str) -> List[str]:
         text = self.__scrap_unnecessary_corpus(text)
         return self.__split_into_sentences(text)
@@ -78,15 +97,31 @@ class Tokeniser:
         """
         Builds the vocabulary from the given corpus.
         """
-        tokenized_sentences = self.tokenise_into_words(corpus)
-        vocab = set()
+        tokenized_sentences = self.__tokenise_into_words(corpus)
 
         for sentence in tokenized_sentences:
-            vocab.update(sentence)
+            self.__vocab.update(sentence)
+            self.__vocab_freq.update({word: self.__vocab_freq.get(word, 0) + 1 for word in sentence})
 
-        self.__word_to_index = {word: idx for idx, word in enumerate(vocab)}
+        replaced_tokenized_sentences = [
+            [
+                word if self.__vocab_freq[word] >= self.__frequency_treshold else '<UNK>'
+                for word in sentence
+            ]
+            for sentence in tokenized_sentences
+        ]
+
+        # Update the tokenized_sentences in place
+        tokenized_sentences = replaced_tokenized_sentences
+
+        # Filter the vocabulary in one pass
+        self.__vocab = set([word for word in self.__vocab if self.__vocab_freq[word] > self.__frequency_treshold])
+
+        self.__vocab.update(['<s>', '</s>', '<UNK>'])
+
+        self.__word_to_index = {word: idx for idx, word in enumerate(self.__vocab)}
         self.__index_to_word = {idx: word for word, idx in self.__word_to_index.items()}
-        self.__vocab_size = len(vocab)
+        self.__vocab_size = len(self.__vocab)
 
     def word_to_index(self, word: str) -> int:
         """
@@ -118,6 +153,25 @@ class Tokeniser:
         Decodes a list of indices into a sentence (list of words).
         """
         return [self.index_to_word(index) for index in indices]
+
+    def __len__(self):
+        return self.vocab_size
+
+    def state_dict(self):
+        return {
+            'word_to_index': self.__word_to_index,
+            'index_to_word': self.__index_to_word,
+            'vocab': self.__vocab,
+            'vocab_freq': self.__vocab_freq,
+            'vocab_size': self.__vocab_size
+        }
+
+    def load_state_dict(self, state_dict):
+        self.__word_to_index = state_dict['word_to_index']
+        self.__index_to_word = state_dict['index_to_word']
+        self.__vocab = state_dict['vocab']
+        self.__vocab_freq = state_dict['vocab_freq']
+        self.__vocab_size = state_dict['vocab_size']
 
 if __name__ == '__main__':
     with open('/dev/tty', 'w') as tty:
