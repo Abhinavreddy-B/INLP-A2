@@ -53,10 +53,10 @@ class NWP_Wrapper:
         self.__k = k
         self.__n = n
 
-    def train(self, till_epoch = EPOCHS, checkpoint_path = None):
+    def train(self, save_checkpoint_path, till_epoch = EPOCHS, load_checkpoint_path = None):
         checkpoint = None
-        if checkpoint_path is not None:
-            checkpoint = self.__load_checkpoint(checkpoint_path)
+        if load_checkpoint_path is not None:
+            checkpoint = self.__load_checkpoint(load_checkpoint_path)
 
         with open(self.__corpus_path, 'r') as f:
             self.__corpus = f.read()
@@ -125,13 +125,13 @@ class NWP_Wrapper:
                 #     print(f'Epoch [{epoch+1}/{EPOCHS}], Step [{i+1}/{len(self.__dataloader)}], Loss: {loss.item():.4f}')
 
             self.__current_epoch = epoch
-            self.__save_checkpoint()
+            self.__save_checkpoint(save_checkpoint_path)
 
             avg_loss /= len(self.__dataloader)
             t.set_postfix(loss=f'{avg_loss:.4f}', progress=f'{epoch+1}/{end_at_epoch}')
             tqdm.write(f'Trained Epoch [{epoch + 1}/{EPOCHS}], Average Loss {avg_loss:.4f}')
 
-    def __save_checkpoint(self):
+    def __save_checkpoint(self, save_checkpoint_path):
         checkpoint = {
             'epoch': self.__current_epoch,
             'tokenizer': self.__tokeniser.state_dict(),
@@ -140,7 +140,7 @@ class NWP_Wrapper:
             'optimizer_state_dict': self.__optimizer.state_dict(),
         }
 
-        torch.save(checkpoint, f'checkpoints/checkpoint_{self.__lm_type}_{self.__n}.pt')
+        torch.save(checkpoint, save_checkpoint_path)
 
     def __load_checkpoint(self, checkpoint_path):
         checkpoint = torch.load(f'{checkpoint_path}')
@@ -163,6 +163,11 @@ class NWP_Wrapper:
             top_k_words = [self.__tokeniser.index_to_word(index.item()) for index in top_k_indices[0]]
             return top_k_words, top_k_prob.flatten()
 
+corpus_map = {
+    'Pride and Prejudice - Jane Austen.txt': 'p',
+    'Ulysses - James Joyce.txt': 'u'
+}
+
 def main():
     # Set up the argument parser
     parser = argparse.ArgumentParser(description="Generate text using a specified language model.")
@@ -175,11 +180,23 @@ def main():
     parser.add_argument('k', type=int,
                         help="Number of candidates for the next word to be printed")
     
+    parser.add_argument('--load_checkpoint', type=str, default=None,
+                    help="Path to load a pre-trained model checkpoint (optional)")
+    parser.add_argument('--save_checkpoint', type=str, default=None,
+                    help="Path to save the trained model checkpoint (optional)")
+    parser.add_argument('--n', type=int, default=3,
+                    help="Value of n for n-gram models (optional)")
+    parser.add_argument('--epochs', type=int, default=10,
+                    help="No of epochs to run from. (this includes the epochs of already trained model)")
+
     # Parse the arguments
     args = parser.parse_args()
 
-    model = NWP_Wrapper(args.lm_type, args.corpus_path, args.k)
-    model.train()
+    if args.save_checkpoint is None:
+        args.save_checkpoint = f'checkpoints/checkpoint_{corpus_map[args.corpus_path.split('/')[-1]]}_{args.lm_type}_{args.n}.pt'
+
+    model = NWP_Wrapper(args.lm_type, args.corpus_path, args.k, args.n)
+    model.train(args.save_checkpoint, load_checkpoint_path=args.load_checkpoint)
     # model.train(checkpoint_path='checkpoints/checkpoint_f_3.pt')
 
     while True:
