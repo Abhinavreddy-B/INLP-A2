@@ -7,6 +7,8 @@ from tqdm import tqdm, trange
 from torch.utils.data import DataLoader, Dataset
 from tokenizer import Tokeniser
 from ngram import NGramModel, NGramDataset
+from abc import ABC, abstractmethod
+from typing import List
 
 RANDOM_SEED = 42
 torch.manual_seed(RANDOM_SEED)
@@ -87,90 +89,169 @@ class RNN(nn.Module):
         # Initialize hidden state with zeros
         return torch.zeros(1, batch_size, self.rnn.hidden_size)
 
-class NWP_Wrapper:
+class NWP_Base(ABC):
+    _k: int
 
-    __lm_type = None
-    __corpus_path = None
-    __k = None
-    __n = None
+    _raw_corpus: str = None
+    _corpus: List[List[str]] = None
+    _vocabulary: set = None
 
-    __corpus = None
-    __tokeniser = None
-    __tokenized_corpus = None
-    __ngram = None
-    __dataset = None
-    __dataloader = None
-    __model = None
-    __criterion = None
-    __optimizer = None
+    _tokenizer: Tokeniser = None
+    _model: nn.Module = None
 
-    def __init__(self, lm_type, corpus_path, k, n = 3):
-        self.__lm_type = lm_type
-        self.__corpus_path = corpus_path
-        self.__k = k
+    _dataset: Dataset = None
+    _dataloader: DataLoader = None
+
+    _optimizer: optim.Optimizer = None
+    _criterion: nn.Module = None
+
+    def __init__(self, tokenizer: Tokeniser, k: int):
+        super().__init__()
+        self._tokenizer = tokenizer
+        self._k = k
+
+    @abstractmethod
+    def _train_init(self, tokenized_corpus: List[List[str]], checkpoint):
+        pass
+    
+    @abstractmethod
+    def _train_step(self):
+        pass
+    
+    @abstractmethod
+    def _get_proba_next_word(self, input_sequence):
+        pass
+
+    def predict_next_word(self, input_sequence):
+        self._model.eval()
+        with torch.no_grad():
+            input_sentences = self._tokenizer.tokenise_into_words(input_sequence)
+            last_sentence = input_sentences[-1]
+
+            output = self._get_proba_next_word(last_sentence)
+
+            probabilities = torch.softmax(output, dim=1)
+            top_k_prob, top_k_indices = torch.topk(probabilities, self._k)
+            top_k_words = [self._tokenizer.index_to_word(index.item()) for index in top_k_indices[0]]
+            return top_k_words, top_k_prob.flatten()
+    
+    def train(self, tokenized_corpus: List[List[str]], checkpoint = None, till_epoch = EPOCHS, save_checkpoint_path = None):
+        if checkpoint is not None:
+            self._current_epoch = checkpoint['epoch']
+        else:
+            self._current_epoch = -1
+
+        self._train_init(tokenized_corpus, checkpoint)
+
+        self._criterion = nn.CrossEntropyLoss()
+        self._optimizer = optim.Adam(self._model.parameters(), lr=LEARNING_RATE)
+        if checkpoint is not None:
+            self._optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+        if (self._current_epoch >= till_epoch):
+            return
+
+        start_from_epoch = self._current_epoch + 1
+        end_at_epoch = till_epoch
+        epoch = start_from_epoch
+
+        t = trange(start_from_epoch, end_at_epoch, desc="Epoch Progress")
+        t.set_postfix(loss=f'-', progress=f'{epoch}/{end_at_epoch}')
+
+        for epoch in t:
+            total_loss = self._train_step()
+
+            self._current_epoch = epoch
+            self.save_checkpoint(save_checkpoint_path)
+
+            avg_loss = total_loss / len(self._dataloader)
+            t.set_postfix(loss=f'{avg_loss:.4f}', progress=f'{epoch+1}/{end_at_epoch}')
+            tqdm.write(f'Trained Epoch [{epoch + 1}/{EPOCHS}], Average Loss {avg_loss:.4f}')
+
+    def _type_specific_checkpoint_attr(self, checkpoint):
+        pass
+
+    def save_checkpoint(self, save_checkpoint_path):
+        checkpoint = {
+            'epoch': self._current_epoch,
+            'tokenizer': self._tokenizer.state_dict(),
+            'model_state_dict': self._model.state_dict(),
+            'optimizer_state_dict': self._optimizer.state_dict(),
+        }
+        checkpoint = self._type_specific_checkpoint_attr(checkpoint)
+
+        torch.save(checkpoint, save_checkpoint_path)
+
+class NWP_FFNN(NWP_Base):
+    __n :int= None
+    __ngram :NGramModel = None
+
+    def __init__(self, tokenizer, k, n):
+        super().__init__(tokenizer, k)
         self.__n = n
-
-    def __FFNN_init(self, checkpoint = None):
-        self.__tokenized_corpus = [['<s>'] * (self.__n - 1) + sentence + ['</s>'] for sentence in self.__tokenized_corpus]
         self.__ngram = NGramModel(self.__n)
+    
+    def _type_specific_checkpoint_attr(self, checkpoint):
+        checkpoint['ngram'] = self.__ngram.state_dict()
+        return checkpoint
+
+    def _train_init(self, tokenized_corpus: List[List[str]], checkpoint):
+        self._model = FFNN(
+                        self._tokenizer.vocab_size,
+                        EMBEDDING_DIM,
+                        HIDDEN_DIM,
+                        self._tokenizer.vocab_size,
+                        self.__n)
+
+        tokenized_corpus = [['<s>'] * (self.__n - 1) + sentence + ['</s>'] for sentence in tokenized_corpus]
         if checkpoint is not None:
             self.__ngram.load_state_dict(checkpoint['ngram'])
         else:
-            self.__ngram.train(self.__tokenized_corpus)
-
-        self.__model = FFNN(
-                        self.__tokeniser.vocab_size,
-                        EMBEDDING_DIM,
-                        HIDDEN_DIM,
-                        self.__tokeniser.vocab_size,
-                        self.__n)
+            self.__ngram.train(tokenized_corpus)
 
         if checkpoint is not None:
-            self.__model.load_state_dict(checkpoint['model_state_dict'])
+            self._model.load_state_dict(checkpoint['model_state_dict'])
         
-        self.__dataset = NGramDataset(self.__ngram, self.__tokeniser, self.__n)
-        self.__dataloader = DataLoader(self.__dataset, batch_size=BATCH_SIZE, shuffle=True)
-    
-    def __FFNN_pred(self, input_sequence :str):
-        self.__model.eval()
-        with torch.no_grad():
-            input_sentences = self.__tokeniser.tokenise_into_words(input_sequence)
-            last_sentence = input_sentences[-1]
-            last_sentence = ['<s>'] * (self.__n - 1) + last_sentence
+        self._dataset = NGramDataset(self.__ngram, self._tokenizer, self.__n)
+        self._dataloader = DataLoader(self._dataset, batch_size=BATCH_SIZE, shuffle=True)
 
-            input_sequence = [self.__tokeniser.word_to_index(word) for word in last_sentence]
-            input_sequence = input_sequence[-(self.__n-1):]
-
-            input_tensor = torch.tensor(input_sequence, dtype=torch.long).unsqueeze(0)
-            output = self.__model(input_tensor)
-            probabilities = torch.softmax(output, dim=1)
-            top_k_prob, top_k_indices = torch.topk(probabilities, self.__k)
-            top_k_words = [self.__tokeniser.index_to_word(index.item()) for index in top_k_indices[0]]
-            return top_k_words, top_k_prob.flatten()
-
-    def __FFNN_train(self):
+    def _train_step(self):
         total_loss = 0
-        for i, (x, y) in tqdm(enumerate(self.__dataloader),desc='Batch', total=len(self.__dataloader), leave=False):
-            self.__optimizer.zero_grad()
-            outputs = self.__model(x)
-            loss = self.__criterion(outputs, y)
+        for i, (x, y) in tqdm(enumerate(self._dataloader),desc='Batch', total=len(self._dataloader), leave=False):
+            self._optimizer.zero_grad()
+            outputs = self._model(x)
+            loss = self._criterion(outputs, y)
             total_loss = total_loss + loss
             loss.backward()
-            self.__optimizer.step()
+            self._optimizer.step()
         return total_loss
 
-    def __RNN_init(self, checkpoint = None):
-        self.__tokenized_corpus = [['<s>'] + sentence + ['</s>'] for sentence in self.__tokenized_corpus]
-        self.__tokenized_corpus = [[self.__tokeniser.word_to_index(word) for word in sentence] for sentence in self.__tokenized_corpus]
+    def _get_proba_next_word(self, input_sequence):
+        last_sentence = ['<s>'] * (self.__n - 1) + input_sequence
 
-        self.__model = RNN(
-                        self.__tokeniser.vocab_size,
+        input_sequence = self._tokenizer.encode(last_sentence)
+        input_sequence = input_sequence[-(self.__n-1):]
+
+        input_tensor = torch.tensor(input_sequence, dtype=torch.long).unsqueeze(0)
+        output = self._model(input_tensor)
+        return output
+
+class NWP_RNN(NWP_Base):
+    def __init__(self, tokenizer, k):
+        super().__init__(tokenizer, k)
+
+    def _train_init(self, tokenized_corpus: List[List[str]], checkpoint):
+        self._model = RNN(
+                        self._tokenizer.vocab_size,
                         EMBEDDING_DIM,
                         HIDDEN_DIM,
-                        self.__tokeniser.vocab_size)
+                        self._tokenizer.vocab_size)
+
+        tokenized_corpus = [['<s>'] + sentence + ['</s>'] for sentence in tokenized_corpus]
+        tokenized_corpus = [[self._tokenizer.word_to_index(word) for word in sentence] for sentence in tokenized_corpus]
 
         if checkpoint is not None:
-            self.__model.load_state_dict(checkpoint['model_state_dict'])
+            self._model.load_state_dict(checkpoint['model_state_dict'])
         
         def collate_fn(batch):
             inputs, targets = zip(*batch)
@@ -183,61 +264,63 @@ class NWP_Wrapper:
             
             return inputs_padded, targets
 
-        self.__dataset = RNNDataset(self.__tokenized_corpus, RNN_SEQUENCE_LENGTH, RNN_PAD_TOKEN_INT)
-        self.__dataloader = DataLoader(self.__dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
+        self._dataset = RNNDataset(tokenized_corpus, RNN_SEQUENCE_LENGTH, RNN_PAD_TOKEN_INT)
+        self._dataloader = DataLoader(self._dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
 
-    def __RNN_train(self):
+    def _train_step(self):
         total_loss = 0
-        hidden = self.__model.init_hidden(BATCH_SIZE)
+        hidden = self._model.init_hidden(BATCH_SIZE)
 
-        for i, (x, y) in tqdm(enumerate(self.__dataloader),desc='Batch', total=len(self.__dataloader), leave=False):
-            self.__optimizer.zero_grad()
+        for i, (x, y) in tqdm(enumerate(self._dataloader),desc='Batch', total=len(self._dataloader), leave=False):
+            self._optimizer.zero_grad()
 
             if hidden.size(1) != x.size(0):  
                 hidden = hidden[:, :x.size(0), :].detach()
 
-            # print('Forward pass', x.shape, hidden.shape)
-            outputs, hidden = self.__model(x, hidden)
-            loss = self.__criterion(outputs, y)
+            outputs, hidden = self._model(x, hidden)
+            loss = self._criterion(outputs, y)
             total_loss = total_loss + loss
             loss.backward()
-            self.__optimizer.step()
+            self._optimizer.step()
 
             hidden = hidden.detach()
 
         return total_loss
-    
-    def __RNN_pred(self, input_sequence :str):
-        self.__model.eval()  # Set the model to evaluation mode
-        with torch.no_grad():  # Disable gradient computation
-            # Tokenize the input sequence into words
-            input_sentences = self.__tokeniser.tokenise_into_words(input_sequence)
-            last_sentence = input_sentences[-1]  # Get the last sentence
-            
-            # Pad the last sentence with <s> tokens to match the context length (n-1)
-            last_sentence = ['<s>'] * (self.__n - 1) + last_sentence
-            
-            # Convert words to indices
-            input_sequence = [self.__tokeniser.word_to_index(word) for word in last_sentence]
-            input_sequence = input_sequence[-(self.__n - 1):]  # Truncate to the last (n-1) words
-            
-            # Convert input sequence to a tensor
-            input_tensor = torch.tensor(input_sequence, dtype=torch.long).unsqueeze(0)  # Add batch dimension
-            
-            # Initialize hidden state for the RNN
-            hidden = self.__model.init_hidden(1)  # Batch size is 1 for inference
-            
-            # Forward pass through the RNN
-            output, hidden = self.__model(input_tensor, hidden)
-            
-            # Compute probabilities using softmax
-            probabilities = torch.softmax(output, dim=1)
-            
-            # Get the top-k predicted words and their probabilities
-            top_k_prob, top_k_indices = torch.topk(probabilities, self.__k)
-            top_k_words = [self.__tokeniser.index_to_word(index.item()) for index in top_k_indices[0]]
-            
-            return top_k_words, top_k_prob.flatten()
+
+    def _get_proba_next_word(self, input_sequence):
+        last_sentence = ['<s>'] + input_sequence
+        input_sequence = self._tokenizer.encode(last_sentence)
+        input_tensor = torch.tensor(input_sequence, dtype=torch.long).unsqueeze(0)  # Add batch dimension
+
+        hidden = self._model.init_hidden(1)
+        output, hidden = self._model(input_tensor, hidden)
+        return output
+
+class NWP_Wrapper:
+
+    __lm_type = None
+    __corpus_path = None
+    __k = None
+    __n = None
+
+    __corpus: str = None
+    __tokenizer: Tokeniser = None
+    __model: NWP_Base = None
+
+    def __init__(self, lm_type, corpus_path, k, n = 3):
+        self.__lm_type = lm_type
+        self.__corpus_path = corpus_path
+        self.__k = k
+        self.__n = n
+
+        self.__tokenizer = Tokeniser()
+
+        if self.__lm_type == 'f':
+            self.__model = NWP_FFNN(self.__tokenizer, self.__k, self.__n)
+        elif self.__lm_type == 'r':
+            self.__model = NWP_RNN(self.__tokenizer, self.__k)
+        else:
+            raise ValueError(f'Invalid model type: {self.__lm_type}')
 
     def train(self, save_checkpoint_path, till_epoch = EPOCHS, load_checkpoint_path = None):
         checkpoint = None
@@ -247,79 +330,20 @@ class NWP_Wrapper:
         with open(self.__corpus_path, 'r') as f:
             self.__corpus = f.read()
 
-
         if checkpoint is not None:
-            self.__current_epoch = checkpoint['epoch']
+            self.__tokenizer.load_state_dict(checkpoint['tokenizer'])
         else:
-            self.__current_epoch = -1
+            self.__tokenizer.build_vocabulary(self.__corpus)
+        self.__tokenized_corpus = self.__tokenizer.tokenise_into_words(self.__corpus)
 
-
-        self.__tokeniser = Tokeniser()
-        if checkpoint is not None:
-            self.__tokeniser.load_state_dict(checkpoint['tokenizer'])
-        else:
-            self.__tokeniser.build_vocabulary(self.__corpus)
-        self.__tokenized_corpus = self.__tokeniser.tokenise_into_words(self.__corpus)
-
-        if self.__lm_type == 'f':
-            self.__FFNN_init(checkpoint)
-        elif self.__lm_type == 'r':
-            self.__RNN_init(checkpoint)
-        else:
-            raise ValueError(f"Invalid language model type: {self.__lm_type}")
-
-        self.__criterion = nn.CrossEntropyLoss()
-
-        self.__optimizer = optim.Adam(self.__model.parameters(), lr=LEARNING_RATE)
-        if checkpoint is not None:
-            self.__optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-
-        if (self.__current_epoch >= till_epoch):
-            return
-
-        start_from_epoch = self.__current_epoch + 1
-        end_at_epoch = till_epoch
-        epoch = start_from_epoch
-
-        t = trange(start_from_epoch, end_at_epoch, desc="Epoch Progress")
-        t.set_postfix(loss=f'-', progress=f'{epoch + 1}/{end_at_epoch}')
-
-        for epoch in t:
-            if self.__lm_type == 'f':
-                total_loss = self.__FFNN_train()
-            elif self.__lm_type == 'r':
-                total_loss = self.__RNN_train()
-            else:
-                raise ValueError(f"Invalid language model type: {self.__lm_type}")
-
-            self.__current_epoch = epoch
-            self.__save_checkpoint(save_checkpoint_path)
-
-            avg_loss = total_loss / len(self.__dataloader)
-            t.set_postfix(loss=f'{avg_loss:.4f}', progress=f'{epoch+1}/{end_at_epoch}')
-            tqdm.write(f'Trained Epoch [{epoch + 1}/{EPOCHS}], Average Loss {avg_loss:.4f}')
-
-    def __save_checkpoint(self, save_checkpoint_path):
-        checkpoint = {
-            'epoch': self.__current_epoch,
-            'tokenizer': self.__tokeniser.state_dict(),
-            'model_state_dict': self.__model.state_dict(),
-            'optimizer_state_dict': self.__optimizer.state_dict(),
-        }
-        if(self.__lm_type == 'f'):
-            checkpoint['ngram'] = self.__ngram.state_dict()
-
-        torch.save(checkpoint, save_checkpoint_path)
+        self.__model.train(self.__tokenized_corpus, checkpoint, till_epoch, save_checkpoint_path)
 
     def __load_checkpoint(self, checkpoint_path):
         checkpoint = torch.load(f'{checkpoint_path}')
         return checkpoint
 
     def predict_next_word(self, input_sequence):
-        if self.__lm_type == 'f':
-            return self.__FFNN_pred(input_sequence)
-        elif self.__lm_type == 'r':
-            return self.__RNN_pred(input_sequence)
+        return self.__model.predict_next_word(input_sequence)
 
 corpus_map = {
     'Pride and Prejudice - Jane Austen.txt': 'p',
