@@ -9,18 +9,20 @@ from tokenizer import Tokeniser
 from ngram import NGramModel, NGramDataset
 from abc import ABC, abstractmethod
 from typing import List
+import gc
 
 RANDOM_SEED = 42
 torch.manual_seed(RANDOM_SEED)
 
-EMBEDDING_DIM = 100
-HIDDEN_DIM = 256
+EMBEDDING_DIM = 50
+HIDDEN_DIM = 128
 LEARNING_RATE = 0.001
 EPOCHS = 10
-BATCH_SIZE = 128
+BATCH_SIZE = 32
 
 RNN_SEQUENCE_LENGTH = 10
-RNN_PAD_TOKEN_INT = -1
+RNN_PAD_TOKEN = '<PAD>'
+RNN_MAX_CONTEXT_WINDOW = 50
 
 class RNNDataset(Dataset):
     def __init__(self, tokenized_sentences, sequence_length, pad_token):
@@ -32,12 +34,14 @@ class RNNDataset(Dataset):
         input_target_pairs = []
         
         for sentence in tokenized_sentences:
-            # Split sentence into sequences of length `sequence_length`
-            for i in range(len(sentence) - self.sequence_length):
-                input_seq = sentence[i:i + self.sequence_length]
-                target = sentence[i + self.sequence_length]
+            for i in range(1, len(sentence)):
+                input_seq = sentence[max(0, i - RNN_MAX_CONTEXT_WINDOW):i]
+                target = sentence[i]
                 input_target_pairs.append((input_seq, target))
         
+        input_target_pairs.sort(key=lambda x: len(x[0]), reverse=True)
+
+        print('Inpt target pairs', len(input_target_pairs))
         return input_target_pairs
     
     def __len__(self):
@@ -76,7 +80,7 @@ class RNN(nn.Module):
     def forward(self, x, hidden):
         # x: (batch_size, sequence_length)
         embedded = self.embedding(x)  # (batch_size, sequence_length, embedding_dim)
-        
+
         # RNN forward pass
         output, hidden = self.rnn(embedded, hidden)  # output: (batch_size, sequence_length, hidden_dim)
         
@@ -166,8 +170,11 @@ class NWP_Base(ABC):
 
             avg_loss = total_loss / len(self._dataloader)
             t.set_postfix(loss=f'{avg_loss:.4f}', progress=f'{epoch+1}/{end_at_epoch}')
-            tqdm.write(f'Trained Epoch [{epoch + 1}/{EPOCHS}], Average Loss {avg_loss:.4f}')
+            tqdm.write(f'Trained Epoch [{epoch + 1}/{end_at_epoch}], Average Loss {avg_loss:.4f}')
 
+            gc.collect()
+
+    @abstractmethod
     def _type_specific_checkpoint_attr(self, checkpoint):
         pass
 
@@ -213,7 +220,7 @@ class NWP_FFNN(NWP_Base):
             self._model.load_state_dict(checkpoint['model_state_dict'])
         
         self._dataset = NGramDataset(self.__ngram, self._tokenizer, self.__n)
-        self._dataloader = DataLoader(self._dataset, batch_size=BATCH_SIZE, shuffle=True)
+        self._dataloader = DataLoader(self._dataset, batch_size=BATCH_SIZE, num_workers=4, persistent_workers=True)
 
     def _train_step(self):
         total_loss = 0
@@ -240,6 +247,9 @@ class NWP_RNN(NWP_Base):
     def __init__(self, tokenizer, k):
         super().__init__(tokenizer, k)
 
+    def _type_specific_checkpoint_attr(self, checkpoint):
+        return checkpoint
+
     def _train_init(self, tokenized_corpus: List[List[str]], checkpoint):
         self._model = RNN(
                         self._tokenizer.vocab_size,
@@ -250,6 +260,8 @@ class NWP_RNN(NWP_Base):
         tokenized_corpus = [['<s>'] + sentence + ['</s>'] for sentence in tokenized_corpus]
         tokenized_corpus = [[self._tokenizer.word_to_index(word) for word in sentence] for sentence in tokenized_corpus]
 
+        RNN_PAD_TOKEN_INT = self._tokenizer.word_to_index(RNN_PAD_TOKEN)
+
         if checkpoint is not None:
             self._model.load_state_dict(checkpoint['model_state_dict'])
         
@@ -258,14 +270,15 @@ class NWP_RNN(NWP_Base):
             
             # Pad input sequences to the same length
             inputs_padded = pad_sequence(inputs, batch_first=True, padding_value=RNN_PAD_TOKEN_INT)
-            
+            # print('Inputs padding', self._tokenizer.decode(inputs[0]), self._tokenizer.decode(inputs_padded[0]))
+
             # Convert targets to a tensor
             targets = torch.tensor(targets, dtype=torch.long)
             
             return inputs_padded, targets
 
         self._dataset = RNNDataset(tokenized_corpus, RNN_SEQUENCE_LENGTH, RNN_PAD_TOKEN_INT)
-        self._dataloader = DataLoader(self._dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
+        self._dataloader = DataLoader(self._dataset, batch_size=BATCH_SIZE, collate_fn=collate_fn, num_workers=4, persistent_workers=True)
 
     def _train_step(self):
         total_loss = 0
@@ -351,6 +364,7 @@ corpus_map = {
 }
 
 def main():
+    print('Inside main')
     # Set up the argument parser
     parser = argparse.ArgumentParser(description="Generate text using a specified language model.")
     
@@ -377,8 +391,10 @@ def main():
     if args.save_checkpoint is None:
         args.save_checkpoint = f'checkpoints/checkpoint_{corpus_map[args.corpus_path.split('/')[-1]]}_{args.lm_type}_{args.n}.pt'
 
+    print('Init model')
     model = NWP_Wrapper(args.lm_type, args.corpus_path, args.k, args.n)
-    model.train(args.save_checkpoint, load_checkpoint_path=args.load_checkpoint)
+    print('Training model')
+    model.train(args.save_checkpoint, load_checkpoint_path=args.load_checkpoint, till_epoch=args.epochs)
     # model.train(checkpoint_path='checkpoints/checkpoint_f_3.pt')
 
     while True:

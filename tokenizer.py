@@ -4,7 +4,7 @@ from typing import List
 import re
 
 import nltk
-nltk.download('punkt_tab')
+# nltk.download('punkt_tab')
 
 from nltk.tokenize import sent_tokenize, word_tokenize, MWETokenizer
 
@@ -117,7 +117,7 @@ class Tokeniser:
         # Filter the vocabulary in one pass
         self.__vocab = set([word for word in self.__vocab if self.__vocab_freq[word] > self.__frequency_treshold])
 
-        self.__vocab.update(['<s>', '</s>', '<UNK>'])
+        self.__vocab.update(['<s>', '</s>', '<UNK>', '<PAD>'])
 
         self.__word_to_index = {word: idx for idx, word in enumerate(self.__vocab)}
         self.__index_to_word = {idx: word for word, idx in self.__word_to_index.items()}
@@ -185,4 +185,4 @@ if __name__ == '__main__':
 
     tokens = tokeniser.tokenise_into_words(text)
 
-    print(tokens)
+    # print(tokens)
