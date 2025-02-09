@@ -74,7 +74,7 @@ class Tokeniser:
 
         return [self.__tokenizer.tokenize(word_tokenize(sentence)) for sentence in sentences]
     
-    def tokenise_into_words(self, text: str) -> List[str]:
+    def tokenise_into_words(self, text: List[str]) -> List[List[str]]:
         text = self.__tokenise_into_words(text)
         transformed_text = []
 

@@ -9,6 +9,8 @@ from tokenizer import Tokeniser
 from ngram import NGramModel, NGramDataset
 from abc import ABC, abstractmethod
 from typing import List
+import numpy as np
+import random
 
 RANDOM_SEED = 42
 torch.manual_seed(RANDOM_SEED)
@@ -164,6 +166,26 @@ class NWP_Base(ABC):
             t.set_postfix(loss=f'{avg_loss:.4f}', progress=f'{epoch+1}/{end_at_epoch}')
             tqdm.write(f'Trained Epoch [{epoch + 1}/{end_at_epoch}], Average Loss {avg_loss:.4f}')
 
+    def benchmark(self, tokenized_corpus: List[List[str]]):
+        perp_list = []
+
+        self._model.eval()
+        with torch.no_grad():
+            for sentence in tqdm(tokenized_corpus, desc='Running banchmark'):
+                perplexity = 0.0
+                count = 0
+                for i in range(1, len(sentence)):
+                    output = self._get_proba_next_word(sentence[:i])
+                    probabilities = torch.softmax(output, dim=1)[0]
+                    proba = probabilities[self._tokenizer.word_to_index(sentence[i])]
+                    perplexity += np.log(proba)
+                    count += 1
+
+                perplexity = np.exp(-perplexity / count)
+                perp_list.append(perplexity)
+
+        return perp_list
+
     @abstractmethod
     def _type_specific_checkpoint_attr(self, checkpoint):
         pass
@@ -259,19 +281,11 @@ class NWP_RNN(NWP_Base):
         
         def collate_fn(batch):
             inputs, targets = zip(*batch)
-            
-            # print(inputs, targets)
-            # Pad input sequences to the same length
             inputs_padded = pad_sequence(inputs, batch_first=True, padding_value=RNN_PAD_TOKEN_INT)
             targets = pad_sequence(targets, batch_first=True, padding_value=RNN_PAD_TOKEN_INT)
-            # print('Inputs padding', self._tokenizer.decode(inputs[0]), self._tokenizer.decode(inputs_padded[0]))
-
-            # Convert targets to a tensor
-            # targets = torch.tensor(targets, dtype=torch.long)
-            
             return inputs_padded, targets
 
-        self._dataset = RNNDataset(tokenized_corpus, RNN_PAD_TOKEN_INT)
+        self._dataset = RNNDataset(tokenized_corpus)
         self._dataloader = DataLoader(self._dataset, batch_size=BATCH_SIZE, collate_fn=collate_fn, num_workers=4, persistent_workers=True)
 
         self._criterion = nn.CrossEntropyLoss(ignore_index=self._tokenizer.word_to_index(RNN_PAD_TOKEN))
@@ -318,6 +332,13 @@ class NWP_Wrapper:
     __n = None
 
     __corpus: str = None
+
+    __train_corpus_raw: List[str] = None
+    __train_corpus: List[List[str]] = None
+
+    __test_corpus_raw: List[str] = None
+    __test_corpus: List[List[str]] = None
+
     __tokenizer: Tokeniser = None
     __model: NWP_Base = None
 
@@ -336,21 +357,58 @@ class NWP_Wrapper:
         else:
             raise ValueError(f'Invalid model type: {self.__lm_type}')
 
-    def train(self, save_checkpoint_path, till_epoch = EPOCHS, load_checkpoint_path = None):
+    def _learn(self, local_corpus, save_checkpoint_path, till_epoch = EPOCHS, load_checkpoint_path = None):
         checkpoint = None
         if load_checkpoint_path is not None:
             checkpoint = self.__load_checkpoint(load_checkpoint_path)
+        if checkpoint is not None:
+            self.__tokenizer.load_state_dict(checkpoint['tokenizer'])
+        else:
+            self.__tokenizer.build_vocabulary(local_corpus)
+        
+        tokenized_local_corpus = self.__tokenizer.tokenise_into_words(local_corpus)
+
+        self.__model.train(tokenized_local_corpus, checkpoint, till_epoch, save_checkpoint_path)
+    
+    def train(self, save_checkpoint_path, till_epoch = EPOCHS, load_checkpoint_path = None, benchmark_file = None):
 
         with open(self.__corpus_path, 'r') as f:
             self.__corpus = f.read()
 
-        if checkpoint is not None:
-            self.__tokenizer.load_state_dict(checkpoint['tokenizer'])
-        else:
-            self.__tokenizer.build_vocabulary(self.__corpus)
-        self.__tokenized_corpus = self.__tokenizer.tokenise_into_words(self.__corpus)
+        corpus_sentences = self.__tokenizer.tokenise_into_sentence(self.__corpus)
 
-        self.__model.train(self.__tokenized_corpus, checkpoint, till_epoch, save_checkpoint_path)
+        random.seed(RANDOM_SEED)
+        random.shuffle(corpus_sentences)
+
+        self.__train_corpus_sent = corpus_sentences[:-1000]
+        self.__test_corpus_sent = corpus_sentences[-1000:]
+
+        self.__train_corpus_raw = ' '.join(self.__train_corpus_sent)
+        self.__test_corpus_raw = ' '.join(self.__test_corpus_sent)
+
+        self._learn(self.__train_corpus_raw, save_checkpoint_path, till_epoch, load_checkpoint_path)
+
+        self.__train_corpus = self.__tokenizer.tokenise_into_words(self.__train_corpus_raw)
+        self.__test_corpus = self.__tokenizer.tokenise_into_words(self.__test_corpus_raw)
+
+        if benchmark_file != None:
+            train_benchmark_file = f'{benchmark_file}-train.txt'
+            train_perplexity_list = self.__model.benchmark(self.__train_corpus)
+            train_avg_perplexity = sum(train_perplexity_list) / len(train_perplexity_list)
+            with open(train_benchmark_file, 'w') as f:
+                print(f'{train_avg_perplexity}', file=f)
+
+                for sentence, perplexity in zip(self.__train_corpus_sent, train_perplexity_list):
+                    print(f'{sentence}\t{perplexity}', file=f)
+
+            test_benchmark_file = f'{benchmark_file}-test.txt'
+            test_perplexity_list = self.__model.benchmark(self.__test_corpus)
+            test_avg_perplexity = sum(test_perplexity_list) / len(test_perplexity_list)
+            with open(test_benchmark_file, 'w') as f:
+                print(f'{test_avg_perplexity}', file=f)
+
+                for sentence, perplexity in zip(self.__test_corpus_sent, test_perplexity_list):
+                    print(f'{sentence}\t{perplexity}', file=f)
 
     def __load_checkpoint(self, checkpoint_path):
         checkpoint = torch.load(f'{checkpoint_path}')
@@ -365,11 +423,8 @@ corpus_map = {
 }
 
 def main():
-    print('Inside main')
-    # Set up the argument parser
     parser = argparse.ArgumentParser(description="Generate text using a specified language model.")
-    
-    # Add arguments
+
     parser.add_argument('lm_type', type=str, choices=['f', 'r', 'l'],
                         help="Type of language model: -f for FFNN, -r for RNN, -l for LSTM")
     parser.add_argument('corpus_path', type=str,
@@ -384,22 +439,26 @@ def main():
     parser.add_argument('--n', type=int, default=3,
                     help="Value of n for n-gram models (optional)")
     parser.add_argument('--epochs', type=int, default=10,
-                    help="No of epochs to run from. (this includes the epochs of already trained model)")
+                    help="No of epochs to run for. (this includes the epochs of already trained model)")
+    parser.add_argument('--benchmark_file', type=str, default=None,
+                    help="Benchmarking runs only if this is provided")
 
-    # Parse the arguments
     args = parser.parse_args()
 
     if args.save_checkpoint is None:
         args.save_checkpoint = f'checkpoints/checkpoint_{corpus_map[args.corpus_path.split('/')[-1]]}_{args.lm_type}_{args.n}.pt'
 
-    print('Init model')
     model = NWP_Wrapper(args.lm_type, args.corpus_path, args.k, args.n)
-    print('Training model')
-    model.train(args.save_checkpoint, load_checkpoint_path=args.load_checkpoint, till_epoch=args.epochs)
-    # model.train(checkpoint_path='checkpoints/checkpoint_f_3.pt')
+    model.train(args.save_checkpoint, load_checkpoint_path=args.load_checkpoint, till_epoch=args.epochs, benchmark_file=args.benchmark_file)
+
+    if args.benchmark_file is not None:
+        return
 
     while True:
         input_sequence = input("Enter the input sequence (space-separated): ")
+        if input_sequence == 'QUIT':
+            break
+
         next_word, probas = model.predict_next_word(input_sequence)
 
         for word, proba in zip(next_word, probas):
