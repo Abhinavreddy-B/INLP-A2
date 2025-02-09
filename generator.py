@@ -9,7 +9,6 @@ from tokenizer import Tokeniser
 from ngram import NGramModel, NGramDataset
 from abc import ABC, abstractmethod
 from typing import List
-import gc
 
 RANDOM_SEED = 42
 torch.manual_seed(RANDOM_SEED)
@@ -20,28 +19,22 @@ LEARNING_RATE = 0.001
 EPOCHS = 10
 BATCH_SIZE = 32
 
-RNN_SEQUENCE_LENGTH = 10
 RNN_PAD_TOKEN = '<PAD>'
-RNN_MAX_CONTEXT_WINDOW = 50
 
 class RNNDataset(Dataset):
-    def __init__(self, tokenized_sentences, sequence_length, pad_token):
-        self.sequence_length = sequence_length
-        self.pad_token = pad_token
+    def __init__(self, tokenized_sentences):
         self.input_target_pairs = self._create_sequences(tokenized_sentences)
     
     def _create_sequences(self, tokenized_sentences):
         input_target_pairs = []
         
         for sentence in tokenized_sentences:
-            for i in range(1, len(sentence)):
-                input_seq = sentence[max(0, i - RNN_MAX_CONTEXT_WINDOW):i]
-                target = sentence[i]
-                input_target_pairs.append((input_seq, target))
+            input_seq = sentence[:-1]
+            target_seq = sentence[1:]
+            input_target_pairs.append((torch.tensor(input_seq), torch.tensor(target_seq)))
         
         input_target_pairs.sort(key=lambda x: len(x[0]), reverse=True)
 
-        print('Inpt target pairs', len(input_target_pairs))
         return input_target_pairs
     
     def __len__(self):
@@ -147,7 +140,6 @@ class NWP_Base(ABC):
 
         self._train_init(tokenized_corpus, checkpoint)
 
-        self._criterion = nn.CrossEntropyLoss()
         self._optimizer = optim.Adam(self._model.parameters(), lr=LEARNING_RATE)
         if checkpoint is not None:
             self._optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -171,8 +163,6 @@ class NWP_Base(ABC):
             avg_loss = total_loss / len(self._dataloader)
             t.set_postfix(loss=f'{avg_loss:.4f}', progress=f'{epoch+1}/{end_at_epoch}')
             tqdm.write(f'Trained Epoch [{epoch + 1}/{end_at_epoch}], Average Loss {avg_loss:.4f}')
-
-            gc.collect()
 
     @abstractmethod
     def _type_specific_checkpoint_attr(self, checkpoint):
@@ -222,6 +212,8 @@ class NWP_FFNN(NWP_Base):
         self._dataset = NGramDataset(self.__ngram, self._tokenizer, self.__n)
         self._dataloader = DataLoader(self._dataset, batch_size=BATCH_SIZE, num_workers=4, persistent_workers=True)
 
+        self._criterion = nn.CrossEntropyLoss()
+
     def _train_step(self):
         total_loss = 0
         for i, (x, y) in tqdm(enumerate(self._dataloader),desc='Batch', total=len(self._dataloader), leave=False):
@@ -268,32 +260,41 @@ class NWP_RNN(NWP_Base):
         def collate_fn(batch):
             inputs, targets = zip(*batch)
             
+            # print(inputs, targets)
             # Pad input sequences to the same length
             inputs_padded = pad_sequence(inputs, batch_first=True, padding_value=RNN_PAD_TOKEN_INT)
+            targets = pad_sequence(targets, batch_first=True, padding_value=RNN_PAD_TOKEN_INT)
             # print('Inputs padding', self._tokenizer.decode(inputs[0]), self._tokenizer.decode(inputs_padded[0]))
 
             # Convert targets to a tensor
-            targets = torch.tensor(targets, dtype=torch.long)
+            # targets = torch.tensor(targets, dtype=torch.long)
             
             return inputs_padded, targets
 
-        self._dataset = RNNDataset(tokenized_corpus, RNN_SEQUENCE_LENGTH, RNN_PAD_TOKEN_INT)
+        self._dataset = RNNDataset(tokenized_corpus, RNN_PAD_TOKEN_INT)
         self._dataloader = DataLoader(self._dataset, batch_size=BATCH_SIZE, collate_fn=collate_fn, num_workers=4, persistent_workers=True)
+
+        self._criterion = nn.CrossEntropyLoss(ignore_index=self._tokenizer.word_to_index(RNN_PAD_TOKEN))
 
     def _train_step(self):
         total_loss = 0
-        hidden = self._model.init_hidden(BATCH_SIZE)
 
         for i, (x, y) in tqdm(enumerate(self._dataloader),desc='Batch', total=len(self._dataloader), leave=False):
             self._optimizer.zero_grad()
 
-            if hidden.size(1) != x.size(0):  
-                hidden = hidden[:, :x.size(0), :].detach()
+            hidden = self._model.init_hidden(x.size(0))
 
-            outputs, hidden = self._model(x, hidden)
-            loss = self._criterion(outputs, y)
-            total_loss = total_loss + loss
-            loss.backward()
+            sequence_length = x.size(1)
+            sequence_loss = 0
+
+            for index in range(sequence_length):
+                outputs, hidden = self._model(x[:, index].unsqueeze(1), hidden)
+                loss = self._criterion(outputs, y[:, index])
+                sequence_loss = sequence_loss + loss
+
+            total_loss += sequence_loss.item() / sequence_length
+
+            sequence_loss.backward()
             self._optimizer.step()
 
             hidden = hidden.detach()
