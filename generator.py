@@ -20,8 +20,10 @@ HIDDEN_DIM = 128
 LEARNING_RATE = 0.001
 EPOCHS = 10
 BATCH_SIZE = 32
+EPSILON = 0.0000001
 
 RNN_PAD_TOKEN = '<PAD>'
+LSTM_PAD_TOKEN = '<PAD>'
 
 class RNNDataset(Dataset):
     def __init__(self, tokenized_sentences):
@@ -78,9 +80,8 @@ class RNN(nn.Module):
 
         # RNN forward pass
         output, hidden = self.rnn(embedded, hidden)  # output: (batch_size, sequence_length, hidden_dim)
-        
-        # Predict the next word using the last hidden state
-        output = self.fc(output[:, -1, :])  # (batch_size, output_dim)
+
+        output = self.fc(output)  # (batch_size, seq_len, output_dim)
         
         return output, hidden
     
@@ -178,7 +179,7 @@ class NWP_Base(ABC):
                     output = self._get_proba_next_word(sentence[:i])
                     probabilities = torch.softmax(output, dim=1)[0]
                     proba = probabilities[self._tokenizer.word_to_index(sentence[i])]
-                    perplexity += np.log(proba)
+                    perplexity += np.log(np.clip(proba, EPSILON, None))
                     count += 1
 
                 perplexity = np.exp(-perplexity / count)
@@ -298,17 +299,16 @@ class NWP_RNN(NWP_Base):
 
             hidden = self._model.init_hidden(x.size(0))
 
-            sequence_length = x.size(1)
-            sequence_loss = 0
+            outputs, hidden = self._model(x, hidden)
 
-            for index in range(sequence_length):
-                outputs, hidden = self._model(x[:, index].unsqueeze(1), hidden)
-                loss = self._criterion(outputs, y[:, index])
-                sequence_loss = sequence_loss + loss
+            output = outputs.view(-1, self._tokenizer.vocab_size)
+            target = y.view(-1)
 
-            total_loss += sequence_loss.item() / sequence_length
+            loss = self._criterion(output, target)
 
-            sequence_loss.backward()
+            total_loss += loss.item()
+
+            loss.backward()
             self._optimizer.step()
 
             hidden = hidden.detach()
@@ -322,7 +322,7 @@ class NWP_RNN(NWP_Base):
 
         hidden = self._model.init_hidden(1)
         output, hidden = self._model(input_tensor, hidden)
-        return output
+        return output[:, -1, :]
 
 class NWP_Wrapper:
 
@@ -354,6 +354,8 @@ class NWP_Wrapper:
             self.__model = NWP_FFNN(self.__tokenizer, self.__k, self.__n)
         elif self.__lm_type == 'r':
             self.__model = NWP_RNN(self.__tokenizer, self.__k)
+        elif self.__lm_type == 'l':
+            self.__model = NWP_LSTM(self.__tokenizer, self.__k)
         else:
             raise ValueError(f'Invalid model type: {self.__lm_type}')
 

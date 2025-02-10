@@ -19,10 +19,6 @@ Language: English
 
 Character set encoding: UTF-8
 
-Produced by: Col Choat and David Widger
-
-*** START OF THE PROJECT GUTENBERG EBOOK ULYSSES ***
-
 [Illustration]
 
 
@@ -32,44 +28,6 @@ Ulysses
 
 
 by James Joyce
-
-
-Contents
-
- — I —
-
- [ 1 ]
- [ 2 ]
- [ 3 ]
-
- — II —
-
- [ 4 ]
- [ 5 ]
- [ 6 ]
- [ 7 ]
- [ 8 ]
- [ 9 ]
- [ 10 ]
- [ 11 ]
- [ 12 ]
- [ 13 ]
- [ 14 ]
- [ 15 ]
-
- — III —
-
- [ 16 ]
- [ 17 ]
- [ 18 ]
-
-
-
-
-— I —
-
-
-[ 1 ]
 
 Stately, plump Buck Mulligan came from the stairhead, bearing a bowl of
 lather on which a mirror and a razor lay crossed. A yellow
