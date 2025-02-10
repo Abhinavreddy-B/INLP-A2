@@ -16,10 +16,10 @@ RANDOM_SEED = 42
 torch.manual_seed(RANDOM_SEED)
 
 EMBEDDING_DIM = 50
-HIDDEN_DIM = 128
+HIDDEN_DIM = 64
 LEARNING_RATE = 0.001
 EPOCHS = 10
-BATCH_SIZE = 32
+BATCH_SIZE = 16
 EPSILON = 0.0000001
 
 RNN_PAD_TOKEN = '<PAD>'
@@ -192,8 +192,13 @@ class NWP_Base(ABC):
         self._model.eval()
         with torch.no_grad():
             for sentence in tqdm(tokenized_corpus, desc='Running banchmark'):
+                if len(sentence) < 3:
+                    perp_list.append(0.0)
+                    continue
+
                 perplexity = 0.0
                 count = 0
+                # print(sentence)
                 for i in range(1, len(sentence)):
                     output = self._get_proba_next_word(sentence[:i])
                     probabilities = torch.softmax(output, dim=1)[0]
