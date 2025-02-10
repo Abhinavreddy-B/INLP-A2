@@ -89,6 +89,25 @@ class RNN(nn.Module):
         # Initialize hidden state with zeros
         return torch.zeros(1, batch_size, self.rnn.hidden_size)
 
+class LSTM(nn.Module):
+    def __init__(self, vocab_size, embedding_dim, hidden_dim, output_dim):
+        super(LSTM, self).__init__()
+        self.embedding = nn.Embedding(vocab_size, embedding_dim)
+        self.lstm = nn.LSTM(embedding_dim, hidden_dim, batch_first=True)
+        self.fc = nn.Linear(hidden_dim, output_dim)
+
+    def forward(self, x, hidden):
+        embedded = self.embedding(x)  # (batch_size, sequence_length, embedding_dim)
+        output, hidden = self.lstm(embedded, hidden)  # output: (batch_size, sequence_length, hidden_dim)
+        output = self.fc(output)  # (batch_size, sequence_length, output_dim)
+        return output, hidden
+
+    def init_hidden(self, batch_size):
+        # Initialize hidden and cell states with zeros
+        h_0 = torch.zeros(1, batch_size, self.lstm.hidden_size)
+        c_0 = torch.zeros(1, batch_size, self.lstm.hidden_size)
+        return (h_0, c_0)
+
 class NWP_Base(ABC):
     _k: int
 
@@ -323,6 +342,73 @@ class NWP_RNN(NWP_Base):
         hidden = self._model.init_hidden(1)
         output, hidden = self._model(input_tensor, hidden)
         return output[:, -1, :]
+
+class NWP_LSTM(NWP_Base):
+    def __init__(self, tokenizer, k):
+        super().__init__(tokenizer, k)
+
+    def _type_specific_checkpoint_attr(self, checkpoint):
+        return checkpoint
+
+    def _train_init(self, tokenized_corpus: List[List[str]], checkpoint):
+        self._model = LSTM(
+            self._tokenizer.vocab_size,
+            EMBEDDING_DIM,
+            HIDDEN_DIM,
+            self._tokenizer.vocab_size
+        )
+
+        tokenized_corpus = [['<s>'] + sentence + ['</s>'] for sentence in tokenized_corpus]
+        tokenized_corpus = [[self._tokenizer.word_to_index(word) for word in sentence] for sentence in tokenized_corpus]
+
+        LSTM_PAD_TOKEN_INT = self._tokenizer.word_to_index(RNN_PAD_TOKEN)
+
+        if checkpoint is not None:
+            self._model.load_state_dict(checkpoint['model_state_dict'])
+
+        def collate_fn(batch):
+            inputs, targets = zip(*batch)
+            inputs_padded = pad_sequence(inputs, batch_first=True, padding_value=LSTM_PAD_TOKEN_INT)
+            targets = pad_sequence(targets, batch_first=True, padding_value=LSTM_PAD_TOKEN_INT)
+            return inputs_padded, targets
+
+        self._dataset = RNNDataset(tokenized_corpus)
+        self._dataloader = DataLoader(self._dataset, batch_size=BATCH_SIZE, collate_fn=collate_fn, num_workers=4, persistent_workers=True)
+
+        self._criterion = nn.CrossEntropyLoss(ignore_index=self._tokenizer.word_to_index(RNN_PAD_TOKEN))
+
+    def _train_step(self):
+        total_loss = 0
+
+        for i, (x, y) in tqdm(enumerate(self._dataloader), desc='Batch', total=len(self._dataloader), leave=False):
+            self._optimizer.zero_grad()
+
+            hidden = self._model.init_hidden(x.size(0))
+
+            outputs, hidden = self._model(x, hidden)
+
+            output = outputs.view(-1, self._tokenizer.vocab_size)
+            target = y.view(-1)
+
+            loss = self._criterion(output, target)
+
+            total_loss += loss.item()
+
+            loss.backward()
+            self._optimizer.step()
+
+            hidden = (hidden[0].detach(), hidden[1].detach())  # Detach both hidden and cell states
+
+        return total_loss
+
+    def _get_proba_next_word(self, input_sequence):
+        last_sentence = ['<s>'] + input_sequence
+        input_sequence = self._tokenizer.encode(last_sentence)
+        input_tensor = torch.tensor(input_sequence, dtype=torch.long).unsqueeze(0)  # Add batch dimension
+
+        hidden = self._model.init_hidden(1)
+        output, hidden = self._model(input_tensor, hidden)
+        return output[:, -1, :]  # Return probabilities for the next word
 
 class NWP_Wrapper:
 
