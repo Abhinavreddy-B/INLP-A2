@@ -171,3 +171,21 @@ Trained Epoch [22/25], Average Loss 3.1780
 Trained Epoch [23/25], Average Loss 3.1602
 Trained Epoch [24/25], Average Loss 3.1461
 Trained Epoch [25/25], Average Loss 3.1347
+
+f_u_3n:
+
+Trained Epoch [1/5], Average Loss 6.2658                                                                                              
+Trained Epoch [2/5], Average Loss 5.6891                                                                                              
+Trained Epoch [3/5], Average Loss 5.4208                                                                                              
+Trained Epoch [4/5], Average Loss 5.1819                                                                                              
+Trained Epoch [5/5], Average Loss 4.9661
+Trained Epoch [6/10], Average Loss 4.7811                                                                                             
+Trained Epoch [7/10], Average Loss 4.6338                                                                                             
+Trained Epoch [8/10], Average Loss 4.5198                                                                                             
+Trained Epoch [9/10], Average Loss 4.4295                                                                                             
+Trained Epoch [10/10], Average Loss 4.3533
+Trained Epoch [11/15], Average Loss 4.2875                                                                                            
+Trained Epoch [12/15], Average Loss 4.2300                                                                                            
+Trained Epoch [13/15], Average Loss 4.1776                                                                                            
+Trained Epoch [14/15], Average Loss 4.1317                                                                                            
+Trained Epoch [15/15], Average Loss 4.0889
