@@ -541,6 +541,18 @@ def main():
     if args.save_checkpoint is None:
         args.save_checkpoint = f'checkpoints/checkpoint_{corpus_map[args.corpus_path.split('/')[-1]]}_{args.lm_type}_{args.n}.pt'
 
+    global HIDDEN_DIM, BATCH_SIZE
+
+    if corpus_map[args.corpus_path.split('/')[-1]] == 'p':
+        HIDDEN_DIM = 128
+        BATCH_SIZE = 128
+    else:
+        HIDDEN_DIM = 64
+        if(args.lm_type == 'f'):
+            BATCH_SIZE = 128
+        else:
+            BATCH_SIZE = 16
+
     model = NWP_Wrapper(args.lm_type, args.corpus_path, args.k, args.n)
     model.train(args.save_checkpoint, load_checkpoint_path=args.load_checkpoint, till_epoch=args.epochs, benchmark_file=args.benchmark_file)
 
